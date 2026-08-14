@@ -12,8 +12,9 @@ from datetime import datetime
 from openai import OpenAI
 
 from src.config import config
-from src.data.models import get_session, Suggestion, Product, Store, InventorySnapshot, Conversation
-from sqlalchemy import func
+from src.data.models import get_session, Suggestion, Conversation
+from src.agent.conversation.retriever import StructuredRetriever
+from src.agent.conversation.slots import SlotParser
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +45,12 @@ SYSTEM_PROMPT = """你是智能补货系统的对话助手，帮助采购/运营
 - 预测未来销量（你只解释已有的决策，不替代预测模型）
 - 回答和补货无关的问题（友好告知）
 
+## 检索依据说明
+注入的「当前上下文数据」可能是：
+- 用户显式选中的建议（来自审核台，最精确）
+- 系统从自然语言问题中自动匹配到的（看「检索诊断」了解匹配到了哪家店、哪个商品）
+回答时基于注入的数据即可；若注入数据为空，明确说明"未找到对应决策数据"。
+
 ## 语气
 专业但易懂，像和有经验的同事讨论。允许用户挑战你的判断。"""
 
@@ -59,6 +66,78 @@ class ConversationAgent:
         self.model = config.CONVERSATION_LLM_MODEL
         self.temperature = config.CONVERSATION_TEMPERATURE
         self.max_history = config.CONVERSATION_MAX_HISTORY
+        # 阶段一：结构化检索（FTS5 + LIKE）+ 槽位解析
+        self.retriever = StructuredRetriever()
+        self.parser = SlotParser(self.retriever)
+
+    # ── 自然语言预处理（槽位填充 + 反问澄清，零 LLM）──
+
+    def _preprocess(self, question: str, context: dict | None) -> tuple:
+        """解析问题，返回 (context, diagnostics, rule_answer).
+
+        - context 非空（显式传入）→ 直接走 LLM
+        - rule_answer 非空 → 无需调 LLM（问候/无关/缺槽反问/无匹配）
+        - 其余 → 槽位已解析，context 已组装，带 diagnostics 调 LLM
+        """
+        if context:
+            return context, None, None
+
+        parsed = self.parser.parse(question)
+
+        if parsed["intent"] == "greeting":
+            return None, None, (
+                "你好！我是补货助手，可以帮你解释每条补货建议的逻辑。"
+                "例如问「为什么可乐补这么多」「旗舰店缺货的有哪些」，或直接说 SKU 编号。"
+            )
+        if parsed["intent"] == "outofscope":
+            return None, None, (
+                "我是补货助手，只处理补货相关的问题（解释建议、What-if 分析、门店盘点）。"
+                "补货之外的问题我帮不上忙。"
+            )
+        if parsed["needs_clarification"]:
+            return None, None, (
+                "为了准确回答，我需要确认一下：\n\n" + self.parser.build_clarification(parsed)
+            )
+
+        resolved_ctx = self._slots_to_context(parsed)
+        if not resolved_ctx:
+            return None, None, (
+                "没找到对应的补货建议。试试换个说法，或直接说 SKU 编号（如 SKU-001）、商品名（如可乐）。"
+            )
+
+        diagnostics = {
+            "intent": parsed["intent"],
+            "store": parsed["slots"].get("store", {}).get("name") if parsed["slots"].get("store") else None,
+            "sku": f"{parsed['slots']['sku']['name']}（{parsed['slots']['sku']['sku_code']}）"
+            if parsed["slots"].get("sku") else None,
+            "time_range": parsed["slots"].get("time_range"),
+        }
+        return resolved_ctx, diagnostics, None
+
+    def _slots_to_context(self, parsed: dict) -> dict | None:
+        """把已解析的槽位组装成 context dict."""
+        slots = parsed["slots"]
+        store = slots.get("store")
+        sku = slots.get("sku")
+        if not store or not sku:
+            return None
+        sug_id = self._latest_suggestion_id(store["id"], sku["id"])
+        return {"store_id": store["id"], "sku_id": sku["id"], "suggestion_id": sug_id}
+
+    def _latest_suggestion_id(self, store_id: int, sku_id: int) -> int | None:
+        session = get_session()
+        try:
+            sug = (
+                session.query(Suggestion)
+                .filter(Suggestion.store_id == store_id, Suggestion.product_id == sku_id)
+                .order_by(Suggestion.generated_at.desc())
+                .first()
+            )
+            return sug.id if sug else None
+        finally:
+            session.close()
+
+    # ── 主入口 ─────────────────────────────────────
 
     def ask(self, question: str, context: dict = None, session_id: str = None) -> dict:
         """处理用户提问.
@@ -69,15 +148,19 @@ class ConversationAgent:
             session_id: 对话会话 ID（多轮对话）
 
         Returns:
-            {"answer": "回答文本", "session_id": "..."}
+            {"answer": "回答文本", "session_id": "...", "intent"?: 意图, "rule"?: 是否规则应答}
         """
         session_id = session_id or f"conv_{datetime.now().strftime('%Y%m%d%H%M%S')}"
 
-        # 检索决策上下文
-        decision_context = self._retrieve_context(context) if context else None
+        # 自然语言预处理：缺槽反问 / 问候 / 无关 → 规则应答（不烧 LLM）
+        resolved_ctx, diagnostics, rule_answer = self._preprocess(question, context)
+        if rule_answer:
+            self._save_conversation(session_id, question, rule_answer, None, None)
+            return {"answer": rule_answer, "session_id": session_id, "rule": True}
 
-        # 构建消息
-        messages = self._build_messages(session_id, question, decision_context)
+        context = resolved_ctx
+        decision_context = self._retrieve_context(context) if context else None
+        messages = self._build_messages(session_id, question, decision_context, diagnostics)
 
         try:
             response = self.client.chat.completions.create(
@@ -91,7 +174,11 @@ class ConversationAgent:
             # 保存对话记录
             self._save_conversation(session_id, question, answer, context, decision_context)
 
-            return {"answer": answer, "session_id": session_id}
+            result = {"answer": answer, "session_id": session_id}
+            if diagnostics:
+                result["context"] = context
+                result["diagnostics"] = diagnostics
+            return result
         except Exception as e:
             logger.error(f"Conversation API error: {e}")
             return {
@@ -102,8 +189,17 @@ class ConversationAgent:
     def ask_stream(self, question: str, context: dict = None, session_id: str = None):
         """流式对话（SSE）."""
         session_id = session_id or f"conv_{datetime.now().strftime('%Y%m%d%H%M%S')}"
+
+        # 规则应答路径：直接产出完整答案
+        resolved_ctx, diagnostics, rule_answer = self._preprocess(question, context)
+        if rule_answer:
+            self._save_conversation(session_id, question, rule_answer, None, None)
+            yield rule_answer
+            return
+
+        context = resolved_ctx
         decision_context = self._retrieve_context(context) if context else None
-        messages = self._build_messages(session_id, question, decision_context)
+        messages = self._build_messages(session_id, question, decision_context, diagnostics)
 
         try:
             stream = self.client.chat.completions.create(
@@ -128,82 +224,30 @@ class ConversationAgent:
             yield f"\n\n[系统错误: {str(e)[:100]}]"
 
     def _retrieve_context(self, context: dict) -> dict | None:
-        """RAG 检索：从数据库拉取决策快照和实时数据."""
-        session = get_session()
-        try:
-            result = {}
+        """检索决策上下文：委托给可插拔检索器（阶段一结构化 / 阶段二向量）."""
+        if not context:
+            return None
+        return self.retriever.build_context(
+            store_id=context.get("store_id"),
+            sku_id=context.get("sku_id"),
+            suggestion_id=context.get("suggestion_id"),
+        )
 
-            # 1. 获取建议决策
-            if context.get("suggestion_id"):
-                sug = session.query(Suggestion).filter(Suggestion.id == context["suggestion_id"]).first()
-                if sug:
-                    result["suggestion"] = {
-                        "id": sug.id,
-                        "suggested_qty": sug.suggested_qty,
-                        "urgency": sug.urgency,
-                        "confidence": sug.confidence,
-                        "anomaly_type": sug.anomaly_type,
-                        "reasoning": sug.reasoning,
-                        "status": sug.status,
-                        "generated_at": sug.generated_at,
-                    }
-                    if sug.decision_factors:
-                        try:
-                            result["decision_factors"] = json.loads(sug.decision_factors)
-                        except json.JSONDecodeError:
-                            pass
-
-            # 2. 获取 SKU 信息
-            if context.get("sku_id"):
-                product = session.query(Product).filter(Product.id == context["sku_id"]).first()
-                if product:
-                    result["product"] = {
-                        "id": product.id,
-                        "sku_code": product.sku_code,
-                        "name": product.name,
-                        "category": product.category,
-                        "lead_time_days": product.lead_time_days,
-                        "target_stock_days": product.target_stock_days,
-                        "min_order_qty": product.min_order_qty,
-                    }
-
-            # 3. 获取最新库存（对比决策时 vs 现在）
-            if context.get("store_id") and context.get("sku_id"):
-                latest_inv = (
-                    session.query(InventorySnapshot)
-                    .filter(
-                        InventorySnapshot.store_id == context["store_id"],
-                        InventorySnapshot.product_id == context["sku_id"],
-                    )
-                    .order_by(InventorySnapshot.snapshot_date.desc())
-                    .first()
-                )
-                if latest_inv:
-                    result["current_inventory"] = {
-                        "stock_on_hand": latest_inv.stock_on_hand,
-                        "in_transit": latest_inv.in_transit,
-                        "safety_stock_line": latest_inv.safety_stock_line,
-                        "snapshot_date": latest_inv.snapshot_date,
-                    }
-
-            # 4. 获取门店信息
-            if context.get("store_id"):
-                store = session.query(Store).filter(Store.id == context["store_id"]).first()
-                if store:
-                    result["store"] = {
-                        "id": store.id,
-                        "name": store.name,
-                        "type": store.type,
-                        "maturity": store.maturity,
-                    }
-
-            return result if result else None
-        finally:
-            session.close()
-
-    def _build_messages(self, session_id: str, question: str, decision_context: dict | None) -> list[dict]:
+    def _build_messages(self, session_id: str, question: str, decision_context: dict | None,
+                        diagnostics: dict | None = None) -> list[dict]:
         """构建消息列表（含历史对话）."""
         messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+
+        # 注入检索诊断（自然语言自动匹配时可见）
+        if diagnostics:
+            messages.append({
+                "role": "system",
+                "content": (
+                    "检索诊断（系统根据你的问题自动匹配到的对象）：\n"
+                    f"```json\n{json.dumps(diagnostics, ensure_ascii=False, indent=2)}\n```\n"
+                    "若与用户意图不符，请先指出你理解到的对象，再基于上下文数据回答。"
+                ),
+            })
 
         # 注入决策上下文
         if decision_context:

@@ -104,15 +104,19 @@ Urgent (critical/high): 20
   SKU-010 饼干夹心 150g: stock=26 safety=295 [stockout_risk]
   ...
 
-# 对话引擎（需要 API Key）
+# 对话引擎（需要 API Key；不配 Key 时反问/问候仍可用）
 $ python -m src.agent.conversation
-/context S001 SKU-001
-为什么建议补 60 件？
 
-📊 数据基础：加权日均销量 42.7 件...
-🧮 推演过程：42.7 × (3+7) − 646 − 0 = −219 → 无需补货
-   但安全库存线 423，当前 646 高于安全线 → 库存充足
-🎯 结论：当前库存可售 15 天，无需补货。
+你: 为什么薯片补这么多？          ← 命中 3 个口味 → 自动反问
+助手: 为了准确回答，我需要确认一下：
+  请问是哪家门店？
+  你指的是哪个商品？我找到了「薯片原味(SKU-001)」「薯片烧烤味(SKU-002)」「薯片番茄味(SKU-003)」，请确认。
+
+你: 旗舰店的可乐为什么补这么多    ← 自动解析 门店+SKU
+  → 自动解析: 门店=旗舰店-朝阳区 | SKU=可乐 500ml（SKU-021）
+📊 数据基础：当前库存 322 件，日均销量 37.88 件...
+🧮 推演过程：37.88 × (2+5) − 322 − 0 = −57 → 无需补货
+⚠️ 风险提示：销量下滑 + 数据缺失，建议关注
 ```
 
 ---
@@ -134,7 +138,9 @@ smart-replenishment/
 │   │   │   ├── engine.py            #   Rules+LLM 混合编排 + 降级切换
 │   │   │   └── __main__.py          #   CLI 入口
 │   │   └── conversation/            # M3: 对话引擎
-│   │       ├── agent.py             #   RAG 检索 + 自然语言解释 + What-if
+│   │       ├── agent.py             #   意图/槽位解析 + 检索 + LLM 解释 + What-if
+│   │       ├── retriever.py         #   可插拔检索器（FTS5 结构化 → 阶段二向量）
+│   │       ├── slots.py             #   槽位解析（意图分类 + 目录匹配 + 缺槽反问）
 │   │       └── __main__.py          #   CLI 交互模式
 │   ├── api/                         # M4: FastAPI 后端
 │   │   ├── main.py                  #   应用入口 + 页面路由
@@ -150,7 +156,7 @@ smart-replenishment/
 ├── scripts/
 │   ├── start.sh                     # 一键启动（macOS/Linux）
 │   └── start.bat                    # 一键启动（Windows）
-├── tests/
+├── tests/                      # pytest：检索器 + 槽位解析 + 决策引擎
 ├── notebooks/
 ├── pyproject.toml
 └── README.md
@@ -167,7 +173,8 @@ smart-replenishment/
 | GET | `/api/v1/suggestions/{store_id}` | 门店建议列表（支持过滤/排序） |
 | GET | `/api/v1/suggestions/detail/{id}` | 单条建议详情（含决策因子 JSON） |
 | PUT | `/api/v1/suggestions/{id}/confirm` | 确认/修改/驳回 |
-| POST | `/api/v1/conversation/ask` | 对话追问（同步） |
+| POST | `/api/v1/suggestions/{id}/feedback` | 闭环反馈 👍👎（原因分类 + 写回） |
+| POST | `/api/v1/conversation/ask` | 对话追问（同步，支持自然语言/无上下文） |
 | POST | `/api/v1/conversation/ask/stream` | 对话追问（SSE 流式） |
 
 ---
@@ -204,6 +211,50 @@ RuleEngine 跑全量 50 SKU
 
 ---
 
+## 对话追问：智能客服式槽位填充（阶段一）
+
+对话不是"前端传 ID，后端硬查"，而是**参考智能客服的 Slot Filling**：
+
+```
+用户问题
+  │
+  ▼
+① 意图分类（explain / whatif / compare / summarize / 无关 / 问候）
+  │
+  ▼
+② 槽位提取（目录式匹配：门店名称片段、商品 2 字窗口、SKU 编号、时间范围）
+  │
+  ├── 缺槽 → ③ 反问澄清（纯规则，零 LLM 成本）
+  │        例：「薯片」命中 3 口味 → "你指的是 SKU-001/002/003 哪个？"
+  │
+  └── 齐槽 → ④ 检索决策快照（FTS5 全文 + SQL 结构化）→ ⑤ LLM 基于快照解释
+```
+
+**关键设计**：
+- **可插拔 `Retriever` 接口**（`retriever.py`）→ 检索实现可替换，为阶段二铺路
+- **反问不烧 token**：问候/无关/缺槽全部规则应答，只有真正解释才调 LLM
+- **召回的是决策快照**（决策时的真实因子 + 最新库存对比），不是让 LLM 编理由
+
+### 双版本规划（同一产品，两种规模）
+
+| | 极速版（main 分支） | 完整版（feature/vector-rag 分支） |
+|---|---|---|
+| 适用 | 中小连锁（几千门店内） | 大型连锁 / 百万级历史决策 |
+| 检索 | FTS5 trigram + LIKE + 目录匹配 | 向量语义检索（历史决策 embedding） |
+| 依赖 | 零外部依赖 | 需 embedding 模型（BGE 等） |
+| 追问 | 精确匹配 + 反问澄清 | 相似历史案例 + "上次结果如何" |
+
+---
+
+## 闭环反馈：让 AI 越用越准
+
+详情页对每条建议可点 👍/👎，选择原因分类（数量偏多/偏少/紧急度不准/数据有异常/其他）+ 补充说明，**写回 `suggestions` 表**。
+
+- 供阶段二 RAG 检索"该决策事后效果"（例："上次同样情况补 60，结果补少了吗？"）
+- 面试讲述"规则 → 反馈 → 迭代"的完整闭环
+
+---
+
 ## 完整产品文档
 
 本项目是 PM 全流程闭环项目，配套文档位于 `../草稿/`：
@@ -225,7 +276,7 @@ RuleEngine 跑全量 50 SKU
 |:--:|------|:--:|:--:|
 | M1 | 基础设施 + Mock 数据 | ✅ | — |
 | M2 | Rules+LLM 决策引擎 | ✅ | CLI demo |
-| M3 | 对话解释引擎 | ✅ | CLI demo（需 API Key） |
+| M3 | 对话解释引擎（槽位填充 + 反问 + FTS 检索） | ✅ | CLI / Web 双 demo |
 | M4 | 审核工作台 Web UI | ✅ | Web demo |
 | M5 | 一键启动 + 集成 | ✅ | `scripts/start.bat` |
 | M6 | 面试准备 | 🚧 | README done |

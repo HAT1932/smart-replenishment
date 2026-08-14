@@ -12,10 +12,15 @@
   .row-high { border-left: 3px solid #f59e0b; }
   .row-medium { border-left: 3px solid #3b82f6; }
   .row-low { border-left: 3px solid #9ca3af; }
+  .chat-bubble-user { background: #1677FF; color: #fff; border-radius: 12px 12px 4px 12px; }
+  .chat-bubble-ai { background: #f0f2f5; color: #333; border-radius: 12px 12px 12px 4px; }
 </style>
 </head>
 <body class="min-h-screen" x-data="workbench()" x-init="load()">
-  <div class="max-w-6xl mx-auto px-4 py-6">
+  <div class="max-w-7xl mx-auto px-4 py-6">
+    <div class="flex gap-6">
+    <!-- 左栏：审核表格 -->
+    <div class="flex-1 min-w-0">
     <!-- Top bar -->
     <div class="flex items-center justify-between mb-6">
       <div>
@@ -125,6 +130,33 @@
         加载中...
       </div>
     </div>
+    </div><!-- /左栏 -->
+
+    <!-- 右栏：AI 补货助手（纯自然语言，槽位填充 + 反问澄清） -->
+    <div class="w-80 shrink-0">
+      <div class="bg-white rounded-xl shadow-sm sticky top-6 h-[calc(100vh-3rem)] flex flex-col">
+        <div class="px-4 py-3 border-b">
+          <h2 class="text-sm font-semibold text-gray-900">🤖 AI 补货助手</h2>
+          <p class="text-xs text-gray-400">自然语言提问，缺信息会自动反问</p>
+        </div>
+        <div class="flex-1 overflow-y-auto p-4 space-y-3" id="wb-chat-msgs">
+          <div class="chat-bubble-ai px-3 py-2 text-sm max-w-[85%]">
+            嗨！试试直接问「为什么可乐补这么多」或「旗舰店缺货的有哪些」，我会自动匹配到门店和 SKU，说不清楚就反问。
+          </div>
+        </div>
+        <div class="px-3 py-2 flex flex-wrap gap-1.5 border-t border-gray-100">
+          <button @click="quickAsk('为什么可乐补这么多？')" class="px-2 py-1 text-xs bg-gray-100 rounded-full hover:bg-gray-200">为什么可乐补这么多？</button>
+          <button @click="quickAsk('旗舰店缺货的有哪些？')" class="px-2 py-1 text-xs bg-gray-100 rounded-full hover:bg-gray-200">旗舰店缺货的有哪些？</button>
+          <button @click="quickAsk('如果促销多3天呢？')" class="px-2 py-1 text-xs bg-gray-100 rounded-full hover:bg-gray-200">如果促销多3天？</button>
+        </div>
+        <div class="px-3 py-3 border-t flex gap-2">
+          <input type="text" x-model="chatQuestion" @keydown.enter="sendChat()" placeholder="输入问题..."
+            class="flex-1 text-sm border rounded-lg px-3 py-2 focus:outline-none focus:border-blue-400">
+          <button @click="sendChat()" class="px-4 py-2 bg-blue-500 text-white text-sm rounded-lg hover:bg-blue-600">发送</button>
+        </div>
+      </div>
+    </div>
+    </div><!-- /flex -->
   </div>
 
   <script>
@@ -136,6 +168,8 @@
         summary: {},
         selected: [],
         filters: { urgency: '', category: '' },
+        chatQuestion: '',
+        chatSession: null,
 
         async load() {
           let url = `/api/v1/suggestions/${this.storeId}`;
@@ -186,6 +220,58 @@
             });
           }
           this.load();
+        },
+
+        // ── AI 对话（自然语言：槽位填充 + 反问澄清）──
+        async sendChat() {
+          const q = this.chatQuestion.trim();
+          if (!q) return;
+          this.addChatMsg('user', q);
+          this.chatQuestion = '';
+
+          const msgDiv = this.addChatMsg('ai', '思考中...');
+          try {
+            const res = await fetch('/api/v1/conversation/ask', {
+              method: 'POST',
+              headers: {'Content-Type': 'application/json'},
+              body: JSON.stringify({
+                question: q,
+                context: null,   // 无锁定上下文 → 走自然语言解析 + 反问
+                session_id: this.chatSession
+              })
+            });
+            const data = await res.json();
+            msgDiv.innerHTML = this.renderMarkdown(data.answer);
+            this.chatSession = data.session_id;
+          } catch(e) {
+            msgDiv.textContent = 'Error: ' + e.message;
+          }
+          this.scrollChat();
+        },
+
+        quickAsk(q) { this.chatQuestion = q; this.sendChat(); },
+
+        addChatMsg(role, text) {
+          const div = document.createElement('div');
+          div.className = role === 'user'
+            ? 'chat-bubble-user px-3 py-2 text-sm max-w-[85%] ml-auto'
+            : 'chat-bubble-ai px-3 py-2 text-sm max-w-[85%]';
+          div.textContent = text;
+          document.getElementById('wb-chat-msgs').appendChild(div);
+          this.scrollChat();
+          return div;
+        },
+
+        scrollChat() {
+          const el = document.getElementById('wb-chat-msgs');
+          setTimeout(() => el.scrollTop = el.scrollHeight, 50);
+        },
+
+        renderMarkdown(text) {
+          if (!text) return '';
+          let t = String(text).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+          t = t.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+          return t.replace(/\n/g, '<br>');
         }
       }
     }
