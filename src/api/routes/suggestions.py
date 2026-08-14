@@ -12,6 +12,7 @@ from src.agent.decision.engine import DecisionEngine
 from src.api.schemas import (
     SuggestionItem, SuggestionListResponse, SuggestionDetailResponse,
     ConfirmRequest, GenerateRequest, POSConnectRequest, POSConnectResponse,
+    FeedbackRequest,
 )
 
 logger = logging.getLogger(__name__)
@@ -189,6 +190,10 @@ def suggestion_detail(suggestion_id: int):
                 "status": sug.status,
                 "generated_at": sug.generated_at,
                 "confirmed_at": sug.confirmed_at,
+                "feedback_rating": sug.feedback_rating,
+                "feedback_reason": sug.feedback_reason,
+                "feedback_comment": sug.feedback_comment,
+                "feedback_at": sug.feedback_at,
             },
             decision_factors=decision_factors,
             product={
@@ -252,6 +257,39 @@ def confirm_suggestion(suggestion_id: int, req: ConfirmRequest):
         session.commit()
 
         return {"status": "ok", "new_status": sug.status, "confirmed_at": now}
+    except HTTPException:
+        raise
+    except Exception as e:
+        session.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        session.close()
+
+
+# ═══════════════════════════════════════════════
+# 闭环反馈（👍👎）
+# ═══════════════════════════════════════════════
+
+@router.post("/suggestions/{suggestion_id}/feedback")
+def feedback_suggestion(suggestion_id: int, req: FeedbackRequest):
+    """记录用户对建议的 👍👎 评价，写回供后续学习."""
+    if req.rating not in ("like", "dislike"):
+        raise HTTPException(status_code=400, detail="rating 必须是 like 或 dislike")
+
+    session = get_session()
+    try:
+        sug = session.query(Suggestion).filter(Suggestion.id == suggestion_id).first()
+        if not sug:
+            raise HTTPException(status_code=404, detail="Suggestion not found")
+
+        sug.feedback_rating = req.rating
+        sug.feedback_reason = req.reason or None
+        sug.feedback_comment = req.comment or None
+        sug.feedback_at = datetime.now().isoformat()
+        session.commit()
+
+        logger.info(f"Feedback saved: suggestion={suggestion_id} rating={req.rating} reason={req.reason or '-'}")
+        return {"status": "ok", "rating": req.rating, "feedback_at": sug.feedback_at}
     except HTTPException:
         raise
     except Exception as e:

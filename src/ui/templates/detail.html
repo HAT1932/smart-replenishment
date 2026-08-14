@@ -88,6 +88,54 @@
           <h2 class="text-sm font-semibold text-gray-900 mb-3">推理过程</h2>
           <p class="text-sm text-gray-600 leading-relaxed" x-text="detail?.suggestion?.reasoning"></p>
         </div>
+
+        <!-- 闭环反馈 👍👎 -->
+        <div class="bg-white rounded-xl p-5 shadow-sm">
+          <div class="flex items-center justify-between mb-3">
+            <h2 class="text-sm font-semibold text-gray-900">这条建议是否合理？</h2>
+            <span x-show="feedbackSubmitted" class="text-xs text-gray-400"
+                  x-text="(detail?.suggestion?.feedback_at || '').slice(0, 10) ? '已反馈于 ' + (detail?.suggestion?.feedback_at || '').slice(0, 10) : ''"></span>
+          </div>
+
+          <!-- 按钮区 -->
+          <div class="flex gap-2">
+            <button @click="rate('like')" :disabled="feedbackSubmitted"
+              class="px-4 py-2 text-sm rounded-lg border transition disabled:opacity-50 disabled:cursor-not-allowed"
+              :class="feedbackRating === 'like' ? 'bg-green-500 text-white border-green-500' : 'bg-white border-gray-200 hover:bg-green-50'">
+              👍 建议合理
+            </button>
+            <button @click="rate('dislike')" :disabled="feedbackSubmitted"
+              class="px-4 py-2 text-sm rounded-lg border transition disabled:opacity-50 disabled:cursor-not-allowed"
+              :class="feedbackRating === 'dislike' ? 'bg-red-500 text-white border-red-500' : 'bg-white border-gray-200 hover:bg-red-50'">
+              👎 建议不合理
+            </button>
+          </div>
+
+          <!-- 原因面板（仅 👎 展开） -->
+          <div x-show="showReasonPanel" x-transition class="mt-3 p-3 bg-gray-50 rounded-lg space-y-3">
+            <div class="text-xs text-gray-500">为什么觉得不合理？（可多选，可不选）</div>
+            <div class="flex flex-wrap gap-1.5">
+              <template x-for="r in reasonOptions" :key="r">
+                <button @click="toggleReason(r)"
+                  class="px-2 py-1 text-xs rounded-full border transition"
+                  :class="feedbackReasons.includes(r) ? 'bg-red-100 border-red-300 text-red-600' : 'bg-white border-gray-200 text-gray-600 hover:border-red-300'"
+                  x-text="r"></button>
+              </template>
+            </div>
+            <textarea x-model="feedbackComment" rows="2" placeholder="补充说明（选填）..."
+              class="w-full text-sm border rounded-lg px-3 py-2 focus:outline-none focus:border-red-300"></textarea>
+            <div class="flex justify-end gap-2">
+              <button @click="showReasonPanel=false" class="px-3 py-1.5 text-xs bg-white border rounded-lg hover:bg-gray-100">取消</button>
+              <button @click="submitFeedback()" class="px-3 py-1.5 text-xs bg-red-500 text-white rounded-lg hover:bg-red-600">提交反馈</button>
+            </div>
+          </div>
+
+          <!-- 已提交状态 -->
+          <div x-show="feedbackSubmitted" class="mt-3 text-sm text-gray-600 flex items-center gap-2">
+            <span x-text="feedbackSubmittedText"></span>
+            <button @click="resetFeedback()" class="text-xs text-blue-500 hover:underline">重新评价</button>
+          </div>
+        </div>
       </div>
 
       <!-- Right: Chat panel (2/5) -->
@@ -139,6 +187,12 @@
         storeId: {{ store_id }},
         skuId: {{ sku_id }},
         sugId: {{ suggestion_id or 'null' }},
+        feedbackRating: null,      // like/dislike 当前选中
+        feedbackReasons: [],       // 👎 原因多选
+        reasonOptions: ['数量偏多', '数量偏少', '紧急度不准', '数据有异常', '其他'],
+        feedbackComment: '',
+        showReasonPanel: false,
+        feedbackSubmitted: false,
 
         async load() {
           if (!this.sugId) return;
@@ -147,6 +201,62 @@
           this.factors = this.detail.decision_factors || {};
           this.product = this.detail.product || {};
           this.inv = this.detail.current_inventory || {};
+
+          // 回显已有反馈
+          const fb = this.detail?.suggestion?.feedback_rating;
+          if (fb) {
+            this.feedbackRating = fb;
+            this.feedbackSubmitted = true;
+          }
+        },
+
+        get feedbackSubmittedText() {
+          return this.feedbackRating === 'like' ? '✅ 已记录「建议合理」' : '✅ 已记录「建议不合理」';
+        },
+
+        async rate(rating) {
+          if (this.feedbackSubmitted) return;
+          this.feedbackRating = rating;
+          if (rating === 'like') {
+            await this.submitFeedback();
+          } else {
+            this.showReasonPanel = true;
+          }
+        },
+
+        toggleReason(r) {
+          const i = this.feedbackReasons.indexOf(r);
+          if (i >= 0) this.feedbackReasons.splice(i, 1);
+          else this.feedbackReasons.push(r);
+        },
+
+        async submitFeedback() {
+          try {
+            const res = await fetch(`/api/v1/suggestions/{{ suggestion_id or 0 }}/feedback`, {
+              method: 'POST',
+              headers: {'Content-Type': 'application/json'},
+              body: JSON.stringify({
+                rating: this.feedbackRating,
+                reason: this.feedbackReasons.join('、'),
+                comment: this.feedbackComment,
+                operator_id: 'demo'
+              })
+            });
+            if (!res.ok) throw new Error(await res.text());
+            this.feedbackSubmitted = true;
+            this.showReasonPanel = false;
+            await this.load();  // 刷新以显示 feedback_at
+          } catch(e) {
+            alert('反馈提交失败: ' + e.message);
+          }
+        },
+
+        resetFeedback() {
+          this.feedbackRating = null;
+          this.feedbackReasons = [];
+          this.feedbackComment = '';
+          this.showReasonPanel = false;
+          this.feedbackSubmitted = false;
         },
 
         async send() {

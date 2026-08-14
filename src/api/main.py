@@ -7,7 +7,10 @@ from pathlib import Path
 from jinja2 import Environment, FileSystemLoader
 
 from src.api.routes import suggestions, conversation
-from src.data.models import get_session, Store, Suggestion, Product
+from src.data.models import get_session, Store, Suggestion, Product, init_db
+
+# 启动时确保表结构就绪（含轻量迁移：老库自动补列）
+init_db()
 
 # ── App ──
 app = FastAPI(title="AI Replenishment Agent", version="0.1.0")

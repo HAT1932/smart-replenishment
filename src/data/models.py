@@ -1,12 +1,15 @@
 """SQLAlchemy 模型定义 —— 对齐 PRD v3.0 附录数据库设计."""
 
+import logging
 from datetime import datetime
 from sqlalchemy import (
     Column, Integer, Float, String, Text, ForeignKey, UniqueConstraint,
-    Index, create_engine, event
+    Index, create_engine, event, inspect, text
 )
 from sqlalchemy.orm import DeclarativeBase, relationship, Session
 from src.config import config
+
+logger = logging.getLogger(__name__)
 
 
 class Base(DeclarativeBase):
@@ -162,6 +165,12 @@ class Suggestion(Base):
     operator_id = Column(String)
     modify_reason = Column(String)
 
+    # ── 闭环反馈（👍👎 写回，供后续 RAG 学习）──
+    feedback_rating = Column(String)                           # like/dislike
+    feedback_reason = Column(String)                           # 数量偏多/偏少/紧急度不准/其他
+    feedback_comment = Column(Text)                            # 自由补充
+    feedback_at = Column(String)                               # 反馈时间
+
     store = relationship("Store", back_populates="suggestions")
     product = relationship("Product", back_populates="suggestions")
 
@@ -191,8 +200,34 @@ class Conversation(Base):
         return f"<Conv {self.session_id} {self.role}>"
 
 
-# ── 一键建表 ─────────────────────────────────────────
+# ── 一键建表 + 轻量迁移 ────────────────────────────
+
+def _migrate():
+    """为已有 SQLite 库补充新增列（create_all 不会改已有表结构）."""
+    if "sqlite" not in config.DATABASE_URL:
+        return
+    try:
+        insp = inspect(engine)
+        if "suggestions" not in insp.get_table_names():
+            return  # 表还没建，交给 create_all
+        existing = {c["name"] for c in insp.get_columns("suggestions")}
+        additions = {
+            "feedback_rating": "VARCHAR(10)",
+            "feedback_reason": "VARCHAR(50)",
+            "feedback_comment": "TEXT",
+            "feedback_at": "VARCHAR(40)",
+        }
+        to_add = {k: v for k, v in additions.items() if k not in existing}
+        if to_add:
+            with engine.begin() as conn:
+                for col, ddl in to_add.items():
+                    conn.execute(text(f"ALTER TABLE suggestions ADD COLUMN {col} {ddl}"))
+            logger.info(f"[migrate] suggestions 新增列: {list(to_add)}")
+    except Exception as e:
+        logger.warning(f"[migrate] 迁移跳过: {e}")
+
 
 def init_db():
     """创建所有表（幂等：已存在的表不重建）."""
     Base.metadata.create_all(engine)
+    _migrate()

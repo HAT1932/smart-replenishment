@@ -69,6 +69,13 @@ class ConfirmRequest(BaseModel):
     operator_id: str = ""
 
 
+class FeedbackRequest(BaseModel):
+    rating: str = Field(..., description="like|dislike")
+    reason: str = Field("", description="反馈原因分类，如：数量偏多")
+    comment: str = Field("", description="自由补充说明")
+    operator_id: str = Field("", description="操作人")
+
+
 # ── 对话 ──
 
 class ConversationRequest(BaseModel):
