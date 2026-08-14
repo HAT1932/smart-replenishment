@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AI 智能补货 — 门店列表</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Microsoft YaHei', sans-serif; background: #f5f6f8; }
+  .card { background: #fff; border-radius: 12px; box-shadow: 0 1px 3px rgba(0,0,0,0.08); }
+  .stat-card { border-radius: 10px; padding: 16px 20px; }
+</style>
+</head>
+<body class="min-h-screen">
+  <div class="max-w-4xl mx-auto px-4 py-8">
+    <!-- Header -->
+    <div class="mb-8">
+      <h1 class="text-2xl font-bold text-gray-900">AI 智能补货</h1>
+      <p class="text-sm text-gray-500 mt-1">Rules+LLM 混合决策引擎 · DeepSeek 驱动</p>
+    </div>
+
+    <!-- Store Cards -->
+    <div class="grid gap-4">
+      {% for s in stores %}
+      <a href="/stores/{{ s.id }}" class="card block p-5 hover:shadow-md transition-shadow">
+        <div class="flex items-center justify-between">
+          <div class="flex items-center gap-4">
+            <!-- Store icon -->
+            <div class="w-12 h-12 rounded-lg flex items-center justify-center text-white text-lg font-bold
+              {% if s.maturity == 'new' %}bg-purple-400{% elif s.maturity == 'transition' %}bg-yellow-400{% else %}bg-green-500{% endif %}">
+              {{ s.code[-1] }}
+            </div>
+            <div>
+              <h3 class="font-semibold text-gray-900">{{ s.name }}</h3>
+              <p class="text-xs text-gray-500">
+                {{ s.type }} · {{ s.maturity }}
+                {% if s.maturity == 'new' %}🟣 新店{% elif s.maturity == 'transition' %}🟡 过渡期{% else %}🟢 成熟{% endif %}
+              </p>
+            </div>
+          </div>
+          <div class="flex items-center gap-6 text-right">
+            <div>
+              <div class="text-2xl font-bold text-gray-900">{{ s.pending }}</div>
+              <div class="text-xs text-gray-500">待审核</div>
+            </div>
+            {% if s.critical > 0 %}
+            <div class="stat-card bg-red-50">
+              <div class="text-lg font-bold text-red-600">{{ s.critical }}</div>
+              <div class="text-xs text-red-500">缺货风险</div>
+            </div>
+            {% endif %}
+            <svg class="w-5 h-5 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/>
+            </svg>
+          </div>
+        </div>
+      </a>
+      {% endfor %}
+    </div>
+
+    <!-- Quick actions -->
+    <div class="mt-6 flex gap-3">
+      <button onclick="regenerate()" class="px-4 py-2 bg-blue-500 text-white text-sm rounded-lg hover:bg-blue-600 transition">
+        重新生成所有建议
+      </button>
+      <span class="text-xs text-gray-400 self-center">每天 04:00 自动生成</span>
+    </div>
+  </div>
+
+  <script>
+    async function regenerate() {
+      const stores = {{ stores|tojson }};
+      for (const s of stores) {
+        try {
+          const res = await fetch(`/api/v1/suggestions/generate`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({store_id: s.id, force: true})
+          });
+          const data = await res.json();
+          console.log(`${s.code}: ${data.mode}, ${data.total} SKUs`);
+        } catch(e) { console.error(e); }
+      }
+      alert('Done! Refresh to see results.');
+    }
+  </script>
+</body>
+</html>

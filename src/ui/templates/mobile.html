@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>门店确认</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Microsoft YaHei', sans-serif; background: #f5f6f8; }
+</style>
+</head>
+<body class="min-h-screen" x-data="mobileConfirm()" x-init="load()">
+  <!-- Phone frame -->
+  <div class="max-w-sm mx-auto min-h-screen bg-white shadow-lg">
+    <!-- Header -->
+    <div class="px-4 py-4 bg-blue-500 text-white">
+      <h1 class="text-lg font-bold" x-text="storeName">门店确认</h1>
+      <p class="text-xs text-blue-100 mt-1">总部建议待确认</p>
+    </div>
+
+    <!-- Pending items -->
+    <div class="divide-y">
+      <template x-for="item in items" :key="item.id">
+        <div class="px-4 py-3">
+          <div class="flex items-center justify-between mb-2">
+            <div>
+              <div class="text-sm font-medium" x-text="item.sku_code + ' ' + item.sku_name"></div>
+              <div class="text-xs text-gray-400" x-text="item.category"></div>
+            </div>
+            <span class="px-2 py-0.5 rounded-full text-xs font-medium"
+              :class="item.urgency === 'critical' ? 'bg-red-100 text-red-700' : 'bg-blue-100 text-blue-700'"
+              x-text="item.urgency === 'critical' ? '紧急' : '正常'"></span>
+          </div>
+
+          <div class="flex items-center gap-3 mb-2">
+            <div class="flex-1 text-xs text-gray-500">
+              库存 <span class="font-mono font-bold text-gray-900" x-text="item.current_stock">0</span>
+              &nbsp;→ 建议补 <span class="font-mono font-bold text-blue-600" x-text="item.suggested_qty || '不补'">0</span>
+            </div>
+            <!-- Adjust slider -->
+            <input type="range" min="0.8" max="1.2" step="0.05" value="1.0"
+              class="w-20 h-1.5 accent-blue-500"
+              @input="item.adjustFactor = parseFloat($event.target.value); item.finalQty = Math.round((item.suggested_qty || 0) * item.adjustFactor)">
+          </div>
+
+          <div class="flex items-center justify-between">
+            <span class="text-xs text-gray-400" x-text="'调整后: ' + (item.finalQty || 0) + ' 件'"></span>
+            <button @click="confirmItem(item)" class="px-4 py-1.5 bg-green-500 text-white text-xs rounded-lg">
+              确认
+            </button>
+          </div>
+        </div>
+      </template>
+    </div>
+
+    <div x-show="items.length === 0" class="px-4 py-12 text-center text-gray-400 text-sm">
+      暂无待确认项
+    </div>
+
+    <!-- Bottom bar -->
+    <div class="fixed bottom-0 max-w-sm w-full px-4 py-3 bg-white border-t">
+      <button @click="confirmAll()" class="w-full py-2.5 bg-blue-500 text-white text-sm font-medium rounded-lg"
+        :disabled="items.length === 0">
+        全部确认（{{ items.length }} 项）
+      </button>
+    </div>
+  </div>
+
+  <script>
+    function mobileConfirm() {
+      return {
+        storeId: {{ store_id }},
+        storeName: '{{ store_name }}',
+        items: [],
+
+        async load() {
+          const res = await fetch(`/api/v1/suggestions/${this.storeId}?status=pending`);
+          const data = await res.json();
+          this.storeName = data.store_name;
+          this.items = data.suggestions.map(s => ({
+            ...s,
+            adjustFactor: 1.0,
+            finalQty: s.suggested_qty || 0
+          }));
+        },
+
+        async confirmItem(item) {
+          const action = item.finalQty === item.suggested_qty ? 'confirm' : 'modify';
+          await fetch(`/api/v1/suggestions/${item.id}/confirm`, {
+            method: 'PUT',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+              action,
+              new_quantity: item.finalQty,
+              reason: action === 'modify' ? `Store adjusted ±${Math.round((item.adjustFactor-1)*100)}%` : '',
+              operator_id: 'store_manager'
+            })
+          });
+          this.items = this.items.filter(i => i.id !== item.id);
+        },
+
+        async confirmAll() {
+          for (const item of [...this.items]) {
+            await this.confirmItem(item);
+          }
+        }
+      }
+    }
+  </script>
+</body>
+</html>

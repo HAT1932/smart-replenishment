@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>建议详情 & 对话</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Microsoft YaHei', sans-serif; background: #f5f6f8; }
+  .chat-bubble-user { background: #1677FF; color: #fff; border-radius: 12px 12px 4px 12px; }
+  .chat-bubble-ai { background: #f0f2f5; color: #333; border-radius: 12px 12px 12px 4px; }
+</style>
+</head>
+<body class="min-h-screen" x-data="detailPage()" x-init="load()">
+  <div class="max-w-7xl mx-auto px-4 py-6">
+    <!-- Top bar -->
+    <div class="flex items-center justify-between mb-6">
+      <div>
+        <a :href="`/stores/{{ store_id }}`" class="text-sm text-blue-500 hover:underline">&larr; 返回审核台</a>
+        <h1 class="text-xl font-bold text-gray-900 mt-1">
+          <span x-text="product?.sku_code || 'SKU'"></span>
+          <span x-text="product?.name || ''"></span>
+        </h1>
+      </div>
+      <div class="flex gap-2">
+        <button @click="confirm('modify')" class="px-4 py-2 text-sm bg-white border rounded-lg hover:bg-gray-50">修改</button>
+        <button @click="confirm('confirm')" class="px-4 py-2 text-sm bg-blue-500 text-white rounded-lg hover:bg-blue-600">确认建议</button>
+      </div>
+    </div>
+
+    <div class="grid grid-cols-5 gap-6">
+      <!-- Left: Decision factors (3/5) -->
+      <div class="col-span-3 space-y-4">
+        <!-- Decision summary card -->
+        <div class="bg-white rounded-xl p-5 shadow-sm">
+          <h2 class="text-sm font-semibold text-gray-900 mb-4">决策因子</h2>
+          <div class="grid grid-cols-2 gap-4 text-sm">
+            <div class="p-3 bg-gray-50 rounded-lg">
+              <div class="text-gray-500">建议补货量</div>
+              <div class="text-2xl font-bold text-gray-900 mt-1" x-text="detail?.suggestion?.suggested_qty || '—'"></div>
+            </div>
+            <div class="p-3 bg-gray-50 rounded-lg">
+              <div class="text-gray-500">紧急度</div>
+              <div class="text-lg font-bold mt-1" :class="urgencyColor(detail?.suggestion?.urgency)" x-text="urgencyText(detail?.suggestion?.urgency)"></div>
+            </div>
+            <div class="p-3 bg-gray-50 rounded-lg">
+              <div class="text-gray-500">当前库存</div>
+              <div class="text-xl font-mono font-bold mt-1" x-text="inv?.stock_on_hand || 0"></div>
+            </div>
+            <div class="p-3 bg-gray-50 rounded-lg">
+              <div class="text-gray-500">安全库存线</div>
+              <div class="text-xl font-mono font-bold mt-1" x-text="inv?.safety_stock_line || 0"></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Formula breakdown -->
+        <div class="bg-white rounded-xl p-5 shadow-sm" x-show="factors">
+          <h2 class="text-sm font-semibold text-gray-900 mb-4">补货公式拆解</h2>
+          <div class="text-sm space-y-2">
+            <div class="flex justify-between py-2 border-b" x-show="factors.avg_daily_sales">
+              <span class="text-gray-500">加权日均销量</span>
+              <span class="font-mono font-bold" x-text="factors.avg_daily_sales?.toFixed(1)"></span>
+            </div>
+            <div class="flex justify-between py-2 border-b">
+              <span class="text-gray-500">× (前置期 + 目标可售天数)</span>
+              <span class="font-mono" x-text="`${factors.lead_time_days || 0} + ${factors.target_stock_days || 0} = ${(factors.lead_time_days || 0) + (factors.target_stock_days || 0)} 天`"></span>
+            </div>
+            <div class="flex justify-between py-2 border-b">
+              <span class="text-gray-500">− 当前库存</span>
+              <span class="font-mono text-red-500" x-text="`− ${factors.current_stock || 0}`"></span>
+            </div>
+            <div class="flex justify-between py-2 border-b" x-show="factors.in_transit">
+              <span class="text-gray-500">− 在途库存</span>
+              <span class="font-mono text-red-500" x-text="`− ${factors.in_transit || 0}`"></span>
+            </div>
+            <div class="flex justify-between py-2 font-bold">
+              <span>= 建议补货</span>
+              <span class="font-mono text-lg" x-text="detail?.suggestion?.suggested_qty || '—'"></span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Reasoning -->
+        <div class="bg-white rounded-xl p-5 shadow-sm" x-show="detail?.suggestion?.reasoning">
+          <h2 class="text-sm font-semibold text-gray-900 mb-3">推理过程</h2>
+          <p class="text-sm text-gray-600 leading-relaxed" x-text="detail?.suggestion?.reasoning"></p>
+        </div>
+      </div>
+
+      <!-- Right: Chat panel (2/5) -->
+      <div class="col-span-2">
+        <div class="bg-white rounded-xl shadow-sm h-[calc(100vh-180px)] flex flex-col">
+          <div class="px-4 py-3 border-b">
+            <h2 class="text-sm font-semibold text-gray-900">AI 对话助手</h2>
+            <p class="text-xs text-gray-400">可追问决策逻辑、尝试 What-if</p>
+          </div>
+
+          <!-- Messages -->
+          <div class="flex-1 overflow-y-auto p-4 space-y-3" id="chat-messages">
+            <div class="chat-bubble-ai px-3 py-2 text-sm max-w-[85%]">
+              👋 你好！我看到 <span x-text="product?.name || '该SKU'"></span>
+              的建议是 <strong x-text="detail?.suggestion?.suggested_qty || '—'"></strong> 件。
+              你可以问我为什么、或者试试 What-if 场景。
+            </div>
+          </div>
+
+          <!-- Quick asks -->
+          <div class="px-3 py-2 flex flex-wrap gap-1.5 border-t border-gray-100">
+            <button @click="quickAsk('为什么是这个数量？')" class="px-2 py-1 text-xs bg-gray-100 rounded-full hover:bg-gray-200">为什么是这个数量？</button>
+            <button @click="quickAsk('如果促销多3天呢？')" class="px-2 py-1 text-xs bg-gray-100 rounded-full hover:bg-gray-200">如果促销多3天？</button>
+            <button @click="quickAsk('保守方案怎么做？')" class="px-2 py-1 text-xs bg-gray-100 rounded-full hover:bg-gray-200">保守方案？</button>
+            <button @click="quickAsk('有什么风险？')" class="px-2 py-1 text-xs bg-gray-100 rounded-full hover:bg-gray-200">有什么风险？</button>
+          </div>
+
+          <!-- Input -->
+          <div class="px-3 py-3 border-t flex gap-2">
+            <input type="text" x-model="question" @keydown.enter="send()"
+              placeholder="输入问题..."
+              class="flex-1 text-sm border rounded-lg px-3 py-2 focus:outline-none focus:border-blue-400">
+            <button @click="send()" class="px-4 py-2 bg-blue-500 text-white text-sm rounded-lg hover:bg-blue-600">发送</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    function detailPage() {
+      return {
+        detail: {},
+        factors: {},
+        product: {},
+        inv: {},
+        question: '',
+        sessionId: null,
+        storeId: {{ store_id }},
+        skuId: {{ sku_id }},
+        sugId: {{ suggestion_id or 'null' }},
+
+        async load() {
+          if (!this.sugId) return;
+          const res = await fetch(`/api/v1/suggestions/detail/${this.sugId}`);
+          this.detail = await res.json();
+          this.factors = this.detail.decision_factors || {};
+          this.product = this.detail.product || {};
+          this.inv = this.detail.current_inventory || {};
+        },
+
+        async send() {
+          const q = this.question.trim();
+          if (!q) return;
+          this.addMessage('user', q);
+          this.question = '';
+
+          const msgDiv = this.addMessage('ai', '思考中...');
+          try {
+            const res = await fetch('/api/v1/conversation/ask', {
+              method: 'POST',
+              headers: {'Content-Type': 'application/json'},
+              body: JSON.stringify({
+                question: q,
+                context: {store_id: this.storeId, sku_id: this.skuId, suggestion_id: this.sugId},
+                session_id: this.sessionId
+              })
+            });
+            const data = await res.json();
+            msgDiv.textContent = data.answer;
+            this.sessionId = data.session_id;
+          } catch(e) {
+            msgDiv.textContent = 'Error: ' + e.message;
+          }
+          this.scrollChat();
+        },
+
+        quickAsk(q) { this.question = q; this.send(); },
+
+        addMessage(role, text) {
+          const div = document.createElement('div');
+          div.className = role === 'user' ? 'chat-bubble-user px-3 py-2 text-sm max-w-[85%] ml-auto' : 'chat-bubble-ai px-3 py-2 text-sm max-w-[85%]';
+          div.textContent = text;
+          document.getElementById('chat-messages').appendChild(div);
+          this.scrollChat();
+          return div;
+        },
+
+        scrollChat() {
+          const el = document.getElementById('chat-messages');
+          setTimeout(() => el.scrollTop = el.scrollHeight, 50);
+        },
+
+        urgencyText(u) {
+          return {'critical':'🔴 缺货高风险','high':'🟠 紧急补货','medium':'🔵 正常','low':'⚪ 库存充足'}[u] || u || '';
+        },
+        urgencyColor(u) {
+          return {'critical':'text-red-600','high':'text-orange-600','medium':'text-blue-600','low':'text-gray-400'}[u] || '';
+        },
+
+        async confirm(action) {
+          const reason = action === 'modify' ? prompt('修改原因：') : '';
+          const newQty = action === 'modify' ? parseInt(prompt('新数量：')) : null;
+          await fetch(`/api/v1/suggestions/{{ suggestion_id or 0 }}/confirm`, {
+            method: 'PUT',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({action, new_quantity: newQty, reason, operator_id: 'demo'})
+          });
+          alert('操作成功！');
+          this.load();
+        }
+      }
+    }
+  </script>
+</body>
+</html>

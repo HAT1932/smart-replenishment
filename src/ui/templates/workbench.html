@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>审核工作台</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Microsoft YaHei', sans-serif; background: #f5f6f8; }
+  .row-critical { border-left: 3px solid #ef4444; }
+  .row-high { border-left: 3px solid #f59e0b; }
+  .row-medium { border-left: 3px solid #3b82f6; }
+  .row-low { border-left: 3px solid #9ca3af; }
+</style>
+</head>
+<body class="min-h-screen" x-data="workbench()" x-init="load()">
+  <div class="max-w-6xl mx-auto px-4 py-6">
+    <!-- Top bar -->
+    <div class="flex items-center justify-between mb-6">
+      <div>
+        <a href="/" class="text-sm text-blue-500 hover:underline">&larr; 返回门店列表</a>
+        <h1 class="text-xl font-bold text-gray-900 mt-1" x-text="storeName">审核工作台</h1>
+      </div>
+      <button @click="load()" class="px-4 py-2 text-sm bg-white border rounded-lg hover:bg-gray-50">
+        🔄 刷新
+      </button>
+    </div>
+
+    <!-- Stat cards -->
+    <div class="grid grid-cols-4 gap-4 mb-6">
+      <div class="bg-white rounded-xl p-4 shadow-sm">
+        <div class="text-2xl font-bold text-gray-900" x-text="summary.pending || 0">0</div>
+        <div class="text-xs text-gray-500 mt-1">待审核</div>
+      </div>
+      <div class="bg-red-50 rounded-xl p-4 shadow-sm">
+        <div class="text-2xl font-bold text-red-600" x-text="summary.critical || 0">0</div>
+        <div class="text-xs text-red-500 mt-1">🔴 缺货高风险</div>
+      </div>
+      <div class="bg-orange-50 rounded-xl p-4 shadow-sm">
+        <div class="text-2xl font-bold text-orange-600" x-text="summary.high || 0">0</div>
+        <div class="text-xs text-orange-500 mt-1">🟠 紧急</div>
+      </div>
+      <div class="bg-blue-50 rounded-xl p-4 shadow-sm">
+        <div class="text-2xl font-bold text-blue-600" x-text="(summary.confirmed || 0)">0</div>
+        <div class="text-xs text-blue-500 mt-1">已确认</div>
+      </div>
+    </div>
+
+    <!-- Filters -->
+    <div class="bg-white rounded-xl p-4 shadow-sm mb-4 flex flex-wrap gap-3 items-center">
+      <span class="text-sm text-gray-500">筛选：</span>
+      <select x-model="filters.urgency" @change="load()" class="text-sm border rounded-lg px-3 py-1.5">
+        <option value="">全部紧急度</option>
+        <option value="critical">🔴 缺货高风险</option>
+        <option value="high">🟠 紧急</option>
+        <option value="medium">🔵 正常</option>
+        <option value="low">⚪ 库存充足</option>
+      </select>
+      <select x-model="filters.category" @change="load()" class="text-sm border rounded-lg px-3 py-1.5">
+        <option value="">全部分类</option>
+        <option value="零食">零食</option>
+        <option value="饮料">饮料</option>
+        <option value="日化">日化</option>
+      </select>
+      <button @click="batchConfirm()" class="ml-auto px-4 py-1.5 bg-blue-500 text-white text-sm rounded-lg hover:bg-blue-600">
+        批量确认选中
+      </button>
+    </div>
+
+    <!-- Suggestion list -->
+    <div class="bg-white rounded-xl shadow-sm overflow-hidden">
+      <!-- Table header -->
+      <div class="grid grid-cols-12 gap-2 px-4 py-3 bg-gray-50 text-xs text-gray-500 font-medium border-b">
+        <div class="col-span-1"><input type="checkbox" @change="toggleAll($event)"></div>
+        <div class="col-span-3">SKU</div>
+        <div class="col-span-1 text-right">库存</div>
+        <div class="col-span-1 text-right">日均销量</div>
+        <div class="col-span-1 text-right">建议补货</div>
+        <div class="col-span-2 text-center">紧急度</div>
+        <div class="col-span-2 text-center">标记</div>
+        <div class="col-span-1 text-center">操作</div>
+      </div>
+
+      <!-- Rows -->
+      <template x-for="item in suggestions" :key="item.id">
+        <div :class="'grid grid-cols-12 gap-2 px-4 py-3 border-b hover:bg-gray-50 items-center row-' + item.urgency">
+          <div class="col-span-1">
+            <input type="checkbox" :value="item.id" x-model="selected">
+          </div>
+          <div class="col-span-3">
+            <a :href="`/stores/{{ store_id }}/sku/${item.product_id}`" class="text-sm font-medium text-blue-600 hover:underline" x-text="item.sku_code + ' ' + item.sku_name"></a>
+            <div class="text-xs text-gray-400" x-text="item.category"></div>
+          </div>
+          <div class="col-span-1 text-right">
+            <span class="text-sm font-mono" :class="item.current_stock <= item.safety_stock_line ? 'text-red-600 font-bold' : 'text-gray-700'" x-text="item.current_stock"></span>
+          </div>
+          <div class="col-span-1 text-right text-sm text-gray-600" x-text="(item.decision_factors?.avg_daily_sales || 0).toFixed(1)"></div>
+          <div class="col-span-1 text-right">
+            <span class="text-sm font-bold" :class="item.suggested_qty ? 'text-gray-900' : 'text-gray-400'" x-text="item.suggested_qty || '不补'"></span>
+          </div>
+          <div class="col-span-2 text-center">
+            <span class="inline-block px-2 py-0.5 rounded-full text-xs font-medium"
+              :class="{
+                'bg-red-100 text-red-700': item.urgency === 'critical',
+                'bg-orange-100 text-orange-700': item.urgency === 'high',
+                'bg-blue-100 text-blue-700': item.urgency === 'medium',
+                'bg-gray-100 text-gray-500': item.urgency === 'low'
+              }"
+              x-text="{'critical':'🔴 缺货风险','high':'🟠 紧急','medium':'🔵 正常','low':'⚪ 充足'}[item.urgency]"></span>
+          </div>
+          <div class="col-span-2 text-center">
+            <template x-for="flag in (item.anomaly_flags || [])" :key="flag">
+              <span class="inline-block px-1.5 py-0.5 bg-yellow-100 text-yellow-700 rounded text-xs mr-1" x-text="flagLabel(flag)"></span>
+            </template>
+            <span x-show="item.confidence_emoji" class="text-xs ml-1" x-text="{'purple':'🟣','yellow':'🟡','green':'🟢'}[item.confidence_emoji] || ''"></span>
+          </div>
+          <div class="col-span-1 text-center">
+            <button @click="confirmOne(item.id)" class="px-3 py-1 text-xs bg-green-500 text-white rounded hover:bg-green-600">确认</button>
+          </div>
+        </div>
+      </template>
+
+      <div x-show="suggestions.length === 0" class="px-4 py-12 text-center text-gray-400">
+        加载中...
+      </div>
+    </div>
+  </div>
+
+  <script>
+    function workbench() {
+      return {
+        storeId: {{ store_id }},
+        storeName: '',
+        suggestions: [],
+        summary: {},
+        selected: [],
+        filters: { urgency: '', category: '' },
+
+        async load() {
+          let url = `/api/v1/suggestions/${this.storeId}`;
+          const params = [];
+          if (this.filters.urgency) params.push(`urgency=${this.filters.urgency}`);
+          if (this.filters.category) params.push(`category=${this.filters.category}`);
+          if (params.length) url += '?' + params.join('&');
+
+          const res = await fetch(url);
+          const data = await res.json();
+          this.storeName = data.store_name;
+          this.suggestions = data.suggestions;
+          this.summary = data.summary;
+          this.selected = [];
+        },
+
+        flagLabel(flag) {
+          const labels = {
+            'stockout_risk': '缺货风险', 'overstock': '库存偏高',
+            'sales_surge_unexplained': '销量异常', 'sales_surge_promo': '促销',
+            'sales_drop': '销量骤降', 'data_missing': '数据缺失',
+            'new_product': '新品', 'stockout_recovery': '缺货恢复',
+            'needs_manual_review': '待人工',
+          };
+          return labels[flag] || flag;
+        },
+
+        toggleAll(e) {
+          this.selected = e.target.checked ? this.suggestions.map(s => s.id) : [];
+        },
+
+        async confirmOne(id) {
+          await fetch(`/api/v1/suggestions/${id}/confirm`, {
+            method: 'PUT',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({action: 'confirm', operator_id: 'demo'})
+          });
+          this.load();
+        },
+
+        async batchConfirm() {
+          if (!this.selected.length) return alert('请先勾选要确认的项');
+          for (const id of this.selected) {
+            await fetch(`/api/v1/suggestions/${id}/confirm`, {
+              method: 'PUT',
+              headers: {'Content-Type': 'application/json'},
+              body: JSON.stringify({action: 'confirm', operator_id: 'demo'})
+            });
+          }
+          this.load();
+        }
+      }
+    }
+  </script>
+</body>
+</html>
