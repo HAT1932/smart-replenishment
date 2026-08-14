@@ -33,6 +33,12 @@ class Config:
     CONVERSATION_LLM_MODEL: str = os.getenv("CONVERSATION_LLM_MODEL", "deepseek-chat")
     CONVERSATION_MAX_HISTORY: int = int(os.getenv("CONVERSATION_MAX_HISTORY", "10"))
 
+    # Embedding（阶段二 向量检索；不配 Key → 自动回退结构化检索）
+    EMBEDDING_API_KEY: str = os.getenv("EMBEDDING_API_KEY", "")
+    EMBEDDING_BASE_URL: str = os.getenv("EMBEDDING_BASE_URL", "https://api.siliconflow.cn/v1")
+    EMBEDDING_MODEL: str = os.getenv("EMBEDDING_MODEL", "BAAI/bge-large-zh-v1.5")
+    EMBEDDING_TOP_K: int = int(os.getenv("EMBEDDING_TOP_K", "3"))
+
     @classmethod
     def validate(cls) -> list[str]:
         """验证必要配置，返回缺失项列表."""

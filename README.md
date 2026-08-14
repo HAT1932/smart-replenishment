@@ -244,6 +244,20 @@ RuleEngine 跑全量 50 SKU
 | 依赖 | 零外部依赖 | 需 embedding 模型（BGE 等） |
 | 追问 | 精确匹配 + 反问澄清 | 相似历史案例 + "上次结果如何" |
 
+**阶段二已在本分支实现**（`src/agent/conversation/vector_retriever.py`）：
+
+```bash
+# 1. 申请免费 embedding Key：https://cloud.siliconflow.cn（BGE 中文模型免费档）
+# 2. .env 填入
+#    EMBEDDING_API_KEY=sk-xxx
+#    EMBEDDING_MODEL=BAAI/bge-large-zh-v1.5
+# 3. 重启服务后，对话回答会自动附带「相似历史决策」参考
+#    （历史向量持久化在 suggestion_embeddings 表，增量构建）
+# 未配置 Key → 自动回退极速版结构化检索，功能不降级
+```
+
+无 Key 时 `VectorRetriever` 自动回退 `StructuredRetriever`（极速版能力），系统不崩。
+
 ---
 
 ## 闭环反馈：让 AI 越用越准

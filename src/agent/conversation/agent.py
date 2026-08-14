@@ -13,7 +13,7 @@ from openai import OpenAI
 
 from src.config import config
 from src.data.models import get_session, Suggestion, Conversation
-from src.agent.conversation.retriever import StructuredRetriever
+from src.agent.conversation.vector_retriever import VectorRetriever
 from src.agent.conversation.slots import SlotParser
 
 logger = logging.getLogger(__name__)
@@ -50,6 +50,8 @@ SYSTEM_PROMPT = """你是智能补货系统的对话助手，帮助采购/运营
 - 用户显式选中的建议（来自审核台，最精确）
 - 系统从自然语言问题中自动匹配到的（看「检索诊断」了解匹配到了哪家店、哪个商品）
 回答时基于注入的数据即可；若注入数据为空，明确说明"未找到对应决策数据"。
+「similar_historical」是语义检索到的历史相似决策（含反馈），作为参考佐证，
+回答"上次同样情况结果如何"时用它；不要把它当成当前建议的推导依据。
 
 ## 语气
 专业但易懂，像和有经验的同事讨论。允许用户挑战你的判断。"""
@@ -66,8 +68,8 @@ class ConversationAgent:
         self.model = config.CONVERSATION_LLM_MODEL
         self.temperature = config.CONVERSATION_TEMPERATURE
         self.max_history = config.CONVERSATION_MAX_HISTORY
-        # 阶段一：结构化检索（FTS5 + LIKE）+ 槽位解析
-        self.retriever = StructuredRetriever()
+        # 阶段二（完整版）：向量检索历史决策 + 槽位解析；未配 embedding Key 自动回退结构化
+        self.retriever = VectorRetriever()
         self.parser = SlotParser(self.retriever)
 
     # ── 自然语言预处理（槽位填充 + 反问澄清，零 LLM）──

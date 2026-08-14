@@ -51,6 +51,23 @@ def test_search_long_term_uses_fts(retriever):
     assert hits and "薯片原味" in hits[0]["name"]
 
 
+def test_fts_index_actually_ready(retriever):
+    """FTS 索引真正可用（防止静默降级为 LIKE 导致误判通过）."""
+    from sqlalchemy import text
+    from src.data.models import get_session
+    retriever._ensure_fts()
+    assert retriever._fts_ready is True, "FTS 初始化失败（被静默降级为 LIKE）"
+    s = get_session()
+    try:
+        rows = s.execute(
+            text("SELECT rowid FROM products_fts WHERE products_fts MATCH :q LIMIT 1"),
+            {"q": '"片原味"'},
+        ).fetchall()
+        assert rows, "FTS trigram 索引查询未命中"
+    finally:
+        s.close()
+
+
 def test_search_stores(retriever):
     """门店名子串检索."""
     hits = retriever.search_stores("旗舰")

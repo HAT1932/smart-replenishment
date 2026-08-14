@@ -17,6 +17,7 @@ import json
 import logging
 from abc import ABC, abstractmethod
 
+from sqlalchemy import text
 from src.data.models import (
     get_session, Store, Product, Suggestion, InventorySnapshot,
 )
@@ -68,16 +69,21 @@ class StructuredRetriever(Retriever):
         session = get_session()
         try:
             session.execute(
-                "CREATE VIRTUAL TABLE IF NOT EXISTS products_fts "
-                "USING fts5(sku_code, name, category, tokenize='trigram')"
+                text(
+                    "CREATE VIRTUAL TABLE IF NOT EXISTS products_fts "
+                    "USING fts5(sku_code, name, category, tokenize='trigram')"
+                )
             )
             # 清空重建（产品表可能被重新灌数据）
-            session.execute("DELETE FROM products_fts")
+            session.execute(text("DELETE FROM products_fts"))
             rows = session.query(Product).all()
             for p in rows:
                 session.execute(
-                    "INSERT INTO products_fts(rowid, sku_code, name, category) VALUES (?, ?, ?, ?)",
-                    (p.id, p.sku_code or "", p.name or "", p.category or ""),
+                    text(
+                        "INSERT INTO products_fts(rowid, sku_code, name, category) "
+                        "VALUES (:rowid, :sku, :name, :cat)"
+                    ),
+                    {"rowid": p.id, "sku": p.sku_code or "", "name": p.name or "", "cat": p.category or ""},
                 )
             session.commit()
             self._fts_ready = True
@@ -116,9 +122,11 @@ class StructuredRetriever(Retriever):
                 try:
                     q = term.replace('"', '""')
                     rows = session.execute(
-                        "SELECT rowid, bm25(products_fts) AS rank FROM products_fts "
-                        "WHERE products_fts MATCH ? ORDER BY rank LIMIT ?",
-                        (f'"{q}"', limit),
+                        text(
+                            "SELECT rowid, bm25(products_fts) AS rank FROM products_fts "
+                            "WHERE products_fts MATCH :q ORDER BY rank LIMIT :limit"
+                        ),
+                        {"q": f'"{q}"', "limit": limit},
                     ).fetchall()
                     ids = [r[0] for r in rows]
                     if ids:
