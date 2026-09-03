@@ -11,8 +11,13 @@ import re
 import numpy as np
 import pytest
 
+from src.config import config
 from src.agent.conversation.vector_retriever import VectorRetriever
 from src.data.models import get_session, Suggestion
+
+# 测试专用模型名：与真实 BGE 缓存隔离（避免维度混载 512 vs 1024，
+# 也不会污染/删除真实缓存的向量）
+TEST_MODEL = "test/fake-bigram-512"
 
 
 def _has_suggestions():
@@ -27,13 +32,19 @@ pytestmark = pytest.mark.skipif(not _has_suggestions(), reason="数据库未灌�
 
 
 @pytest.fixture(scope="module", autouse=True)
-def cleanup_embeddings():
-    """测试用假 embedder 会向缓存表写入假向量，结束后清理."""
+def fake_model():
+    """把缓存键切到测试模型名；结束后只删测试模型的假向量（不动真实缓存）."""
+    original = config.EMBEDDING_MODEL
+    config.EMBEDDING_MODEL = TEST_MODEL
     yield
+    config.EMBEDDING_MODEL = original
     from src.data.models import engine
     from sqlalchemy import text
     with engine.begin() as conn:
-        conn.execute(text("DROP TABLE IF EXISTS suggestion_embeddings"))
+        conn.execute(
+            text("DELETE FROM suggestion_embeddings WHERE model = :m"),
+            {"m": TEST_MODEL},
+        )
 
 
 class FakeEmbedder:
@@ -71,7 +82,7 @@ class FakeEmbedder:
 
 
 @pytest.fixture(scope="module")
-def vr():
+def vr(fake_model):
     r = VectorRetriever()
     r._client = FakeEmbedder()  # 注入假 embedder，隔离外部 API
     return r

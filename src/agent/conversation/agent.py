@@ -48,7 +48,9 @@ SYSTEM_PROMPT = """你是智能补货系统的对话助手，帮助采购/运营
 ## 检索依据说明
 注入的「当前上下文数据」可能是：
 - 用户显式选中的建议（来自审核台，最精确）
-- 系统从自然语言问题中自动匹配到的（看「检索诊断」了解匹配到了哪家店、哪个商品）
+- 系统从自然语言问题中自动匹配到的（看「检索诊断」了解匹配到了哪家店、哪个商品；
+  门店/商品也可能是从你之前几轮的提问中沿用下来的）
+- 门店级汇总（含 stats 统计 + suggestions 列表）→ 用于"这家店缺货的有哪些""整体情况"类盘点问题
 回答时基于注入的数据即可；若注入数据为空，明确说明"未找到对应决策数据"。
 「similar_historical」是语义检索到的历史相似决策（含反馈），作为参考佐证，
 回答"上次同样情况结果如何"时用它；不要把它当成当前建议的推导依据。
@@ -71,17 +73,26 @@ class ConversationAgent:
         # 阶段二（完整版）：向量检索历史决策 + 槽位解析；未配 embedding Key 自动回退结构化
         self.retriever = VectorRetriever()
         self.parser = SlotParser(self.retriever)
+        # 多轮槽位状态（对话状态追踪）：session_id → 已积累的槽位。
+        # 反问后用户补答 "社区店-回龙观" 时，与上一轮已提取的 SKU 合并，不再循环反问；
+        # 解析成功后保留为环境上下文，后续 "进货量多少？" 直接继承。
+        self._slot_state: dict[str, dict] = {}
 
-    # ── 自然语言预处理（槽位填充 + 反问澄清，零 LLM）──
+    # ── 自然语言预处理（槽位填充 + 多轮合并 + 反问澄清，零 LLM）──
 
-    def _preprocess(self, question: str, context: dict | None) -> tuple:
+    def _preprocess(self, question: str, context: dict | None,
+                    session_id: str | None = None) -> tuple:
         """解析问题，返回 (context, diagnostics, rule_answer).
 
-        - context 非空（显式传入）→ 直接走 LLM
+        - context 非空（显式传入）→ 播种槽位状态后直接走 LLM
         - rule_answer 非空 → 无需调 LLM（问候/无关/缺槽反问/无匹配）
-        - 其余 → 槽位已解析，context 已组装，带 diagnostics 调 LLM
+        - 其余 → 槽位已解析（含多轮合并），context 已组装，带 diagnostics 调 LLM
         """
+        session_id = session_id or ""
+
         if context:
+            # 显式上下文（审核台选中的建议）→ 存为环境槽位，后续追问可继承
+            self._slot_state[session_id] = self._state_from_context(context)
             return context, None, None
 
         parsed = self.parser.parse(question)
@@ -96,31 +107,83 @@ class ConversationAgent:
                 "我是补货助手，只处理补货相关的问题（解释建议、What-if 分析、门店盘点）。"
                 "补货之外的问题我帮不上忙。"
             )
-        if parsed["needs_clarification"]:
+
+        # ── 多轮合并：本轮新提取的槽位优先，缺失的沿用已积累槽位 ──
+        state = self._slot_state.get(session_id) or {}
+        merged: dict = {
+            "store": state.get("store"),
+            "sku": state.get("sku"),
+            "time_range": state.get("time_range"),
+            "scenario": state.get("scenario"),
+            # 意图：本轮命中关键词用本轮的；补答句（无关键词）沿用上一轮意图
+            "intent": parsed["intent"] if (parsed["intent_kw_hit"] or not state.get("intent"))
+            else state["intent"],
+        }
+        for key in ("store", "sku", "time_range", "scenario"):
+            if parsed["slots"].get(key):
+                merged[key] = parsed["slots"][key]
+        # 反问候选用本轮的匹配结果（反映用户刚说的话）
+        merged["store_matches"] = parsed["slots"]["store_matches"]
+        merged["sku_matches"] = parsed["slots"]["sku_matches"]
+
+        missing = self.parser.missing_slots(merged["intent"], merged)
+        if missing:
+            self._slot_state[session_id] = merged
             return None, None, (
-                "为了准确回答，我需要确认一下：\n\n" + self.parser.build_clarification(parsed)
+                "为了准确回答，我需要确认一下：\n\n"
+                + self.parser.build_clarification({"intent": merged["intent"],
+                                                   "slots": merged, "missing": missing})
             )
 
-        resolved_ctx = self._slots_to_context(parsed)
+        # summarize 意图只要门店 → 门店级汇总（"旗舰店缺货的有哪些？"）
+        if merged["intent"] == "summarize" and merged.get("store") and not merged.get("sku"):
+            summary_ctx = self.retriever.store_summary(merged["store"]["id"])
+            if summary_ctx:
+                self._slot_state[session_id] = merged
+                diagnostics = self._build_diagnostics(merged)
+                return summary_ctx, diagnostics, None
+
+        resolved_ctx = self._slots_to_context(merged)
         if not resolved_ctx:
             return None, None, (
                 "没找到对应的补货建议。试试换个说法，或直接说 SKU 编号（如 SKU-001）、商品名（如可乐）。"
             )
 
-        diagnostics = {
-            "intent": parsed["intent"],
-            "store": parsed["slots"].get("store", {}).get("name") if parsed["slots"].get("store") else None,
-            "sku": f"{parsed['slots']['sku']['name']}（{parsed['slots']['sku']['sku_code']}）"
-            if parsed["slots"].get("sku") else None,
-            "time_range": parsed["slots"].get("time_range"),
-        }
+        # 解析成功 → 状态保留为环境上下文（后续追问继承门店/SKU）
+        self._slot_state[session_id] = merged
+        diagnostics = self._build_diagnostics(merged)
         return resolved_ctx, diagnostics, None
 
-    def _slots_to_context(self, parsed: dict) -> dict | None:
-        """把已解析的槽位组装成 context dict."""
-        slots = parsed["slots"]
-        store = slots.get("store")
-        sku = slots.get("sku")
+    def _state_from_context(self, context: dict) -> dict:
+        """把显式上下文转成槽位状态（补齐名称，供后续追问继承/覆盖）."""
+        store = next(
+            (s for s in self.retriever.all_stores() if s["id"] == context.get("store_id")), None
+        )
+        sku = next(
+            (p for p in self.retriever.all_products() if p["id"] == context.get("sku_id")), None
+        )
+        return {
+            "intent": "explain", "store": store, "sku": sku,
+            "time_range": None, "scenario": None,
+        }
+
+    def _build_diagnostics(self, merged: dict) -> dict:
+        store = merged.get("store")
+        sku = merged.get("sku")
+        diagnostics = {
+            "intent": merged["intent"],
+            "store": store["name"] if store else None,
+            "sku": f"{sku['name']}（{sku['sku_code']}）" if sku else None,
+            "time_range": merged.get("time_range"),
+        }
+        if merged["intent"] == "whatif" and merged.get("scenario"):
+            diagnostics["scenario"] = merged["scenario"]
+        return diagnostics
+
+    def _slots_to_context(self, merged: dict) -> dict | None:
+        """把已合并的槽位组装成 context dict."""
+        store = merged.get("store")
+        sku = merged.get("sku")
         if not store or not sku:
             return None
         sug_id = self._latest_suggestion_id(store["id"], sku["id"])
@@ -155,7 +218,7 @@ class ConversationAgent:
         session_id = session_id or f"conv_{datetime.now().strftime('%Y%m%d%H%M%S')}"
 
         # 自然语言预处理：缺槽反问 / 问候 / 无关 → 规则应答（不烧 LLM）
-        resolved_ctx, diagnostics, rule_answer = self._preprocess(question, context)
+        resolved_ctx, diagnostics, rule_answer = self._preprocess(question, context, session_id)
         if rule_answer:
             self._save_conversation(session_id, question, rule_answer, None, None)
             return {"answer": rule_answer, "session_id": session_id, "rule": True}
@@ -193,7 +256,7 @@ class ConversationAgent:
         session_id = session_id or f"conv_{datetime.now().strftime('%Y%m%d%H%M%S')}"
 
         # 规则应答路径：直接产出完整答案
-        resolved_ctx, diagnostics, rule_answer = self._preprocess(question, context)
+        resolved_ctx, diagnostics, rule_answer = self._preprocess(question, context, session_id)
         if rule_answer:
             self._save_conversation(session_id, question, rule_answer, None, None)
             yield rule_answer
@@ -245,7 +308,8 @@ class ConversationAgent:
             messages.append({
                 "role": "system",
                 "content": (
-                    "检索诊断（系统根据你的问题自动匹配到的对象）：\n"
+                    "检索诊断（系统根据你的问题自动匹配到的对象，"
+                    "可能沿用你之前几轮确认过的门店/商品）：\n"
                     f"```json\n{json.dumps(diagnostics, ensure_ascii=False, indent=2)}\n```\n"
                     "若与用户意图不符，请先指出你理解到的对象，再基于上下文数据回答。"
                 ),

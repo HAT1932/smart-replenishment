@@ -59,6 +59,9 @@ class VectorRetriever(Retriever):
     def all_stores(self) -> list[dict]:
         return self.structured.all_stores()
 
+    def store_summary(self, store_id: int, limit: int = 8) -> dict | None:
+        return self.structured.store_summary(store_id, limit)
+
     # ── embedding ───────────────────────────────────
 
     def embed(self, texts: list[str]) -> list[list[float]] | None:

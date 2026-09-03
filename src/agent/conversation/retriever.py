@@ -286,3 +286,71 @@ class StructuredRetriever(Retriever):
             return result if result else None
         finally:
             session.close()
+
+    def store_summary(self, store_id: int, limit: int = 8) -> dict | None:
+        """门店级汇总（summarize 意图）：最新一批建议按紧急度排序 + 统计.
+
+        回答「这家店缺货的有哪些」「整体补货情况」类问题，
+        单 SKU 上下文（build_context）覆盖不了的场景。
+        """
+        session = get_session()
+        try:
+            store = session.query(Store).filter(Store.id == store_id).first()
+            if not store:
+                return None
+
+            latest = (
+                session.query(Suggestion)
+                .filter(Suggestion.store_id == store_id)
+                .order_by(Suggestion.generated_at.desc())
+                .first()
+            )
+            if not latest:
+                return {
+                    "type": "store_summary",
+                    "store": {"id": store.id, "name": store.name,
+                              "type": store.type, "maturity": store.maturity},
+                    "suggestions": [],
+                }
+
+            batch = (
+                session.query(Suggestion)
+                .filter(
+                    Suggestion.store_id == store_id,
+                    Suggestion.generated_at == latest.generated_at,
+                )
+                .all()
+            )
+            severity = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+            items = sorted(batch, key=lambda s: severity.get(s.urgency or "", 9))
+
+            product_map = {
+                p.id: p for p in session.query(Product)
+                .filter(Product.id.in_([s.product_id for s in batch])).all()
+            }
+
+            return {
+                "type": "store_summary",
+                "store": {"id": store.id, "name": store.name,
+                          "type": store.type, "maturity": store.maturity},
+                "generated_at": latest.generated_at,
+                "stats": {
+                    "total": len(batch),
+                    "critical": sum(1 for s in batch if s.urgency == "critical"),
+                    "high": sum(1 for s in batch if s.urgency == "high"),
+                    "to_replenish": sum(1 for s in batch if (s.suggested_qty or 0) > 0),
+                },
+                "suggestions": [
+                    {
+                        "sku_code": product_map[s.product_id].sku_code,
+                        "name": product_map[s.product_id].name,
+                        "suggested_qty": s.suggested_qty,
+                        "urgency": s.urgency,
+                        "anomaly_type": s.anomaly_type,
+                        "confidence": s.confidence,
+                    }
+                    for s in items[:limit]
+                ],
+            }
+        finally:
+            session.close()
