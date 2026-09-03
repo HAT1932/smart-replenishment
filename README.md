@@ -232,6 +232,8 @@ RuleEngine 跑全量 50 SKU
 
 **关键设计**：
 - **可插拔 `Retriever` 接口**（`retriever.py`）→ 检索实现可替换，为阶段二铺路
+- **分层裁决**：SKU 编号 > 完整名称段 > 2 字窗口——"薯片烧烤味 150g（SKU-002）"直接锁定，不因"薯片"命中 3 个口味而反问
+- **多轮状态追踪**（对话状态追踪）：反问后用户补答"社区店-回龙观"，与上一轮已提取的 SKU **合并**而不是重新解析——不会循环反问；解析成功的门店/SKU 保留为环境上下文，"进货量多少？"这类后续追问直接继承
 - **反问不烧 token**：问候/无关/缺槽全部规则应答，只有真正解释才调 LLM
 - **召回的是决策快照**（决策时的真实因子 + 最新库存对比），不是让 LLM 编理由
 
@@ -243,6 +245,39 @@ RuleEngine 跑全量 50 SKU
 | 检索 | FTS5 trigram + LIKE + 目录匹配 | 向量语义检索（历史决策 embedding） |
 | 依赖 | 零外部依赖 | 需 embedding 模型（BGE 等） |
 | 追问 | 精确匹配 + 反问澄清 | 相似历史案例 + "上次结果如何" |
+
+### 版本切换：一个系统，两个发行版
+
+双版本不是两个独立系统，也不由意图识别在运行时选择——**同一个代码库 + 可插拔 `Retriever` 接口 + 两个 git 分支**：
+
+```
+用户提问
+   │
+   ▼
+对话流程（两个分支完全相同的代码）
+意图分类 → 槽位提取 → 缺槽反问      ← slots.py 一份代码，不参与版本选择
+   │ 齐槽
+   ▼
+agent.py: self.retriever             ← 唯一分叉点（一行装配差异）
+   ├── main 分支   → StructuredRetriever   极速版
+   └── 本分支      → VectorRetriever       完整版
+```
+
+- **部署层**：checkout 哪个分支 = 发哪个版本（类比抖音极速版 / 抖音是两个发行版，不是一个 App 内动态切换）
+- **运行层**：`VectorRetriever` 启动时检查 `EMBEDDING_API_KEY`，未配置 → 语义检索为空，自动退化为极速版行为，系统不崩
+- **完整版是叠加不是替换**：`build_context()` 先跑结构化检索拿决策快照（必跑），再叠加「相似历史决策」——两套检索是包含关系，不是二选一
+
+### 启动完整版
+
+启动命令与极速版**完全相同**——当前 checkout 的分支决定版本：
+
+```bash
+git checkout feature/vector-rag    # main = 极速版；本分支 = 完整版
+scripts\start.bat                  # 同一条命令
+```
+
+- `.env` 与 `replenishment.db` 已 gitignore，切分支不丢配置；历史向量缓存在 `suggestion_embeddings` 表，增量复用（首次冷启动 150 条 ≈ 3s）
+- 未配 `EMBEDDING_API_KEY` 时照常启动，自动降级为极速版
 
 **阶段二已在本分支实现**（`src/agent/conversation/vector_retriever.py`）：
 
