@@ -279,7 +279,7 @@ RuleEngine 跑全量 50 SKU
 | M3 | 对话解释引擎（槽位填充 + 反问 + FTS 检索） | ✅ | CLI / Web 双 demo |
 | M4 | 审核工作台 Web UI | ✅ | Web demo |
 | M5 | 一键启动 + 集成 | ✅ | `scripts/start.bat` |
-| M6 | 面试准备 | 🚧 | README done |
+
 
 ---
 
